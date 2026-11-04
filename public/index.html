@@ -1009,7 +1009,7 @@
         setLoading(true);
         setLoadingStartedAt(Date.now());
         setLoadingMessage('写真を読み取っています…');
-        setLoadingNote(['ていねいに読み取るため、', '1〜2分ほどかかることがあります。', '画面を閉じずに、', 'このままお待ちください。']);
+        setLoadingNote(['1分ほどかかることがあります。', '画面を閉じずに、', 'このままお待ちください。']);
         setError(null);
         const screenLock = await keepScreenOn();
 
@@ -1053,7 +1053,7 @@
         setLoading(true);
         setLoadingStartedAt(Date.now());
         setLoadingMessage('3年後の自分が返信を書いています…');
-        setLoadingNote(['じっくり考えて書くため、', '1分ほどかかることがあります。', '画面を閉じずに、', 'このままお待ちください。']);
+        setLoadingNote(['1分ほどかかることがあります。', '画面を閉じずに、', 'このままお待ちください。']);
         setError(null);
         const screenLock = await keepScreenOn();
 

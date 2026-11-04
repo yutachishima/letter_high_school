@@ -4,18 +4,31 @@
  *
  * 受け取るもの: { profileImage: dataURL, letterImage: dataURL }
  * 返すもの    : { id, token, profile: {…7項目}, letter }
+ *   読み取りには時間がかかるため、待っているあいだは10秒ごとに合図を送り、
+ *   結果は最後にまとめて送ります（lib/common.js の startKeepAliveStream）。
  *
  * 写真はAIに渡すだけで、どこにも保存しません。
  */
 
-import { readProfile, readLetter, visionModel } from '../lib/ai.js';
+import { readProfile, readLetter } from '../lib/ai.js';
 import { assertDatabaseConfigured, ensureTable, insertReading } from '../lib/db.js';
-import { AppError, allowPostOnly, checkImageDataUrl, readBody, sendError } from '../lib/common.js';
+import {
+  AppError,
+  allowPostOnly,
+  checkImageDataUrl,
+  errorBody,
+  readBody,
+  sendError,
+  startKeepAliveStream
+} from '../lib/common.js';
+
+const FALLBACK_MESSAGE = '写真を読み取れませんでした。少し待ってから、もう一度お試しください。';
 
 export default async function handler(req, res) {
   if (!allowPostOnly(req, res)) return;
   res.setHeader('Cache-Control', 'no-store');
 
+  let stream = null;
   try {
     const body = readBody(req);
     const profileImage = checkImageDataUrl(body.profileImage);
@@ -28,16 +41,25 @@ export default async function handler(req, res) {
     // 保存先がない状態でAIを呼ばないように、先に確認する
     assertDatabaseConfigured();
 
-    const [, profile, letter] = await Promise.all([
+    stream = startKeepAliveStream(res);
+
+    const [, profileResult, letterResult] = await Promise.all([
       ensureTable(),
       readProfile(profileImage),
       readLetter(letterImage)
     ]);
 
-    const { id, token } = await insertReading({ profile, letter, model: visionModel() });
+    const { profile } = profileResult;
+    const { letter } = letterResult;
+    const model = profileResult.model === letterResult.model
+      ? profileResult.model
+      : `${profileResult.model} / ${letterResult.model}`;
 
-    return res.status(200).json({ id, token, profile, letter });
+    const { id, token } = await insertReading({ profile, letter, model });
+
+    stream.send({ id, token, profile, letter });
   } catch (err) {
-    return sendError(res, err, '写真を読み取れませんでした。少し待ってから、もう一度お試しください。');
+    if (stream) stream.send(errorBody(err, FALLBACK_MESSAGE));
+    else sendError(res, err, FALLBACK_MESSAGE);
   }
 }

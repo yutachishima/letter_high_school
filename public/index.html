@@ -453,7 +453,7 @@
       try {
         const img = await loadImage(url);
         // 文字を読み取りやすいように大きめにしつつ、送れるサイズに収める
-        const attempts = [[2000, 0.82], [2000, 0.7], [1600, 0.7], [1280, 0.65]];
+        const attempts = [[2400, 0.85], [2400, 0.75], [2000, 0.75], [1600, 0.7], [1280, 0.65]];
         for (const [maxSide, quality] of attempts) {
           const dataUrl = drawJpeg(img, maxSide, quality);
           if (dataUrl.length <= MAX_PHOTO_CHARS) return dataUrl;
@@ -479,17 +479,54 @@
         throw makeError('通信できませんでした。電波の良いところで、もう一度お試しください。');
       }
 
-      const raw = await response.text();
-      let data = null;
-      try { data = JSON.parse(raw); } catch (e) { data = null; }
+      let raw = '';
+      try {
+        raw = await response.text();
+      } catch (e) {
+        throw makeError('通信が途中で切れてしまいました。電波の良いところで、もう一度お試しください。');
+      }
+      const data = parseResponseBody(raw, response.headers.get('content-type') || '');
 
+      if (data && data.error) throw makeError(data.error, data.detail);
       if (!response.ok) {
-        if (data && data.error) throw makeError(data.error, data.detail);
         if (response.status === 413) throw makeError('写真のサイズが大きすぎます。別の写真でお試しください。');
         if (response.status === 504) throw makeError('時間がかかりすぎてしまいました。もう一度お試しください。');
         throw makeError(`エラーが起きました（${response.status}）。少し待ってから、もう一度お試しください。`);
       }
-      return data || {};
+      if (!data) {
+        throw makeError('サーバーからの応答が途中で終わってしまいました。もう一度お試しください。');
+      }
+      return data;
+    }
+
+    /**
+     * サーバーの応答を読む。
+     * 時間のかかる処理では、待っているあいだの合図（": waiting"）のあとに、
+     * 結果が「data: {…}」の形で届く（text/event-stream）。それ以外はふつうの JSON。
+     */
+    function parseResponseBody(raw, contentType) {
+      const parse = (s) => { try { return JSON.parse(s); } catch (e) { return null; } };
+      if (contentType.indexOf('text/event-stream') !== -1) {
+        const lines = raw.split('\n').filter(line => line.indexOf('data:') === 0);
+        return lines.length ? parse(lines[lines.length - 1].slice(5).trim()) : null;
+      }
+      return parse(raw);
+    }
+
+    /** 待っているあいだに、スマホの画面が自動で消えないようにする（対応しているブラウザだけ） */
+    async function keepScreenOn() {
+      try {
+        if (navigator.wakeLock && navigator.wakeLock.request) {
+          return await navigator.wakeLock.request('screen');
+        }
+      } catch (e) {
+        /* 使えない場合はそのまま */
+      }
+      return null;
+    }
+
+    function releaseScreen(lock) {
+      if (lock && lock.release) lock.release().catch(() => {});
     }
 
     function makeError(message, detail) {
@@ -972,8 +1009,9 @@
         setLoading(true);
         setLoadingStartedAt(Date.now());
         setLoadingMessage('写真を読み取っています…');
-        setLoadingNote(['30秒ほどかかります。', '画面を閉じずに、', 'このままお待ちください。']);
+        setLoadingNote(['ていねいに読み取るため、', '1〜2分ほどかかることがあります。', '画面を閉じずに、', 'このままお待ちください。']);
         setError(null);
+        const screenLock = await keepScreenOn();
 
         try {
           const data = await postJson('/api/read', {
@@ -992,6 +1030,7 @@
         } catch (e) {
           setError(e);
         } finally {
+          releaseScreen(screenLock);
           setLoading(false);
           setLoadingMessage('');
           setLoadingNote([]);
@@ -1014,8 +1053,9 @@
         setLoading(true);
         setLoadingStartedAt(Date.now());
         setLoadingMessage('3年後の自分が返信を書いています…');
-        setLoadingNote(['20〜30秒ほどかかります。', '画面を閉じずに、', 'このままお待ちください。']);
+        setLoadingNote(['じっくり考えて書くため、', '1分ほどかかることがあります。', '画面を閉じずに、', 'このままお待ちください。']);
         setError(null);
+        const screenLock = await keepScreenOn();
 
         try {
           const data = await postJson('/api/reply', {
@@ -1029,6 +1069,7 @@
         } catch (e) {
           setError(e);
         } finally {
+          releaseScreen(screenLock);
           setLoading(false);
           setLoadingMessage('');
           setLoadingNote([]);
@@ -1110,8 +1151,8 @@
                   <div className="mt-5 p-4 rounded-xl bg-white/50 border border-amber-200/70">
                     <p className="japanese-serif text-sm text-amber-900 mb-1">📷 きれいに読み取るコツ</p>
                     <ul className="japanese-sans text-sm text-stone-600 leading-relaxed list-disc pl-5">
-                      <li>明るい場所で、影が入らないように撮る</li>
                       <li>書いた部分が画面いっぱいに、まっすぐ写るように撮る</li>
+                      <li>明るい場所で、影が入らないように撮る</li>
                       <li>撮ったあと、文字がぼやけていないか確かめる</li>
                     </ul>
                   </div>
@@ -1127,7 +1168,7 @@
                       <PrimaryButton onClick={readPhotos} disabled={!bothPhotos || anyPreparing}>
                         {anyPreparing
                           ? '写真を準備中…'
-                          : record ? '読み取り結果の確認へ進む' : 'AIに読み取ってもらう'}
+                          : record ? '読み取り結果の確認へ進む' : 'AIで文字を読み取る'}
                       </PrimaryButton>
                       {!bothPhotos && (
                         <p className="japanese-sans text-sm text-stone-500">
@@ -1225,7 +1266,7 @@
                   ) : (
                     <div className="flex flex-col items-center gap-4">
                       <PrimaryButton onClick={requestReply} disabled={!letter.trim()}>
-                        この内容で返信をもらう
+                        AIからの返信を受け取る
                       </PrimaryButton>
                       <SecondaryButton onClick={backToUpload}>
                         写真を選び直す

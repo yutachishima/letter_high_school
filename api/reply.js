@@ -4,9 +4,11 @@
  *
  * 受け取るもの: { id, token, profile: {…7項目}, letter }
  * 返すもの    : { reply }
+ *   返信を書くのには時間がかかるため、待っているあいだは10秒ごとに合図を送り、
+ *   結果は最後にまとめて送ります（lib/common.js の startKeepAliveStream）。
  */
 
-import { writeReply, textModel } from '../lib/ai.js';
+import { writeReply } from '../lib/ai.js';
 import { saveConfirmed, saveReply } from '../lib/db.js';
 import {
   AppError,
@@ -16,14 +18,19 @@ import {
   checkToken,
   cleanProfile,
   cleanText,
+  errorBody,
   readBody,
-  sendError
+  sendError,
+  startKeepAliveStream
 } from '../lib/common.js';
+
+const FALLBACK_MESSAGE = '返信を受け取れませんでした。少し待ってから、もう一度お試しください。';
 
 export default async function handler(req, res) {
   if (!allowPostOnly(req, res)) return;
   res.setHeader('Cache-Control', 'no-store');
 
+  let stream = null;
   try {
     const body = readBody(req);
     const id = checkId(body.id);
@@ -44,11 +51,14 @@ export default async function handler(req, res) {
       throw new AppError('データが見つかりませんでした。お手数ですが、最初からやり直してください。', 404);
     }
 
-    const reply = await writeReply(profile, letter);
-    await saveReply({ id, token, reply, model: textModel() });
+    stream = startKeepAliveStream(res);
 
-    return res.status(200).json({ reply });
+    const { reply, model } = await writeReply(profile, letter);
+    await saveReply({ id, token, reply, model });
+
+    stream.send({ reply });
   } catch (err) {
-    return sendError(res, err, '返信を受け取れませんでした。少し待ってから、もう一度お試しください。');
+    if (stream) stream.send(errorBody(err, FALLBACK_MESSAGE));
+    else sendError(res, err, FALLBACK_MESSAGE);
   }
 }

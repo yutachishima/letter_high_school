@@ -272,6 +272,52 @@
     .japanese-sans { font-family: 'Zen Kaku Gothic New', sans-serif; font-weight: 400; }
     .section-badge { background: #3d6b70; }
 
+    /*
+      2ページ目の入力欄。
+      高さの計算に関わる見た目（文字の大きさ・行の高さ・余白・枠線）は、ここで決めておく。
+      Tailwind（CDN）は新しく画面に出てきたクラスのCSSを少し遅れて作るため、
+      Tailwind のクラスに頼ると、高さの計算がずれて文字が欠けてしまう。
+    */
+    .field-input {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0.65rem 0.85rem;
+      border: 2px solid #fde68a;
+      border-radius: 0.6rem;
+      background: rgba(255, 255, 255, 0.92);
+      color: #292524;
+      font-family: 'Zen Kaku Gothic New', sans-serif;
+      font-size: 16px;      /* 16px未満だと、iPhoneで入力するときに画面が拡大されてしまう */
+      line-height: 1.8;
+      resize: vertical;
+      overflow-y: auto;     /* 万一高さが足りなくても、スクロールして全部読めるように */
+    }
+    .field-input:focus {
+      outline: none;
+      border-color: #fbbf24;
+      box-shadow: 0 0 0 3px rgba(253, 230, 138, 0.8);
+    }
+    .field-input--profile { min-height: calc(1.8em * 3 + 1.3rem + 4px); }   /* 3行分 */
+    .field-input--letter  { min-height: calc(1.8em * 14 + 1.3rem + 4px); }  /* 14行分 */
+
+    /* 読み取り中・返信の作成中の経過時間 */
+    .elapsed-time {
+      font-family: 'Zen Kaku Gothic New', sans-serif;
+      color: #78716c;
+      font-size: 0.95rem;
+      margin-top: 1rem;
+      text-align: center;
+    }
+    .elapsed-time strong {
+      color: #b45309;
+      font-size: 1.9rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      margin: 0 0.15em;
+    }
+
     /* 便箋の罫線（返信の表示用） */
     .ruled {
       background-image: repeating-linear-gradient(
@@ -344,7 +390,7 @@
   </noscript>
 
   <script type="text/babel">
-    const { useState, useRef, useEffect, useLayoutEffect } = React;
+    const { useState, useRef, useEffect, useLayoutEffect, useCallback } = React;
 
     /* ============================================================
        設定（ここを書き換えると、画面の表示が変わります）
@@ -519,7 +565,30 @@
       </svg>
     );
 
-    const LoadingAnimation = ({ message, note }) => (
+    /** 待ち始めてからの経過時間（例：「経過時間 12 秒」） */
+    const ElapsedTime = ({ startedAt }) => {
+      const [now, setNow] = useState(() => Date.now());
+      useEffect(() => {
+        const id = setInterval(() => setNow(Date.now()), 250);
+        return () => clearInterval(id);
+      }, []);
+      if (!startedAt) return null;
+
+      const total = Math.max(0, Math.floor((now - startedAt) / 1000));
+      const minutes = Math.floor(total / 60);
+      const seconds = total % 60;
+
+      // 読み上げソフトが毎秒読み上げないように、aria-hidden にしておく
+      return (
+        <p className="elapsed-time" aria-hidden="true" data-elapsed={total}>
+          経過時間
+          {minutes > 0 && <><strong>{minutes}</strong>分</>}
+          <strong>{seconds}</strong>秒
+        </p>
+      );
+    };
+
+    const LoadingAnimation = ({ message, note, startedAt }) => (
       <div className="flex flex-col items-center justify-center py-10 animate-fade-in-up" role="status" aria-live="polite">
         <div className="relative w-24 h-24 mb-6">
           <div className="absolute inset-0 flex items-center justify-center">
@@ -537,6 +606,7 @@
             />
           ))}
         </div>
+        <ElapsedTime startedAt={startedAt} />
         {note && note.length > 0 && (
           <p className="japanese-sans text-sm text-stone-500 mt-4 text-center leading-relaxed">
             {note.map((part, i) => <Phrase key={i}>{part}</Phrase>)}
@@ -687,24 +757,73 @@
     };
 
     /* ---------- 2ページ目：入力欄（内容に合わせて高さが伸びる） ---------- */
-    const AutoTextarea = ({ value, onChange, minRows = 1, className = '', ...props }) => {
+    // variant: 'profile'（最低3行）または 'letter'（最低14行）。見た目は <style> の .field-input
+    const AutoTextarea = ({ value, onChange, variant = 'profile', ...props }) => {
       const ref = useRef(null);
-      useLayoutEffect(() => {
+
+      // 中身が全部見える高さにする
+      const fit = useCallback(() => {
         const el = ref.current;
         if (!el) return;
+        const cs = window.getComputedStyle(el);
+        const borders = (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
         el.style.height = 'auto';
-        el.style.height = `${el.scrollHeight + 2}px`;
-      }, [value]);
+        el.style.height = `${Math.ceil(el.scrollHeight + borders) + 1}px`;
+      }, []);
+
+      // 文字を入力・修正したとき
+      useLayoutEffect(() => { fit(); }, [value, fit]);
+
+      // 表示したあとで見た目が変わったとき（CSS・フォントの読み込み、画面の回転、幅の変化）
+      useEffect(() => {
+        const el = ref.current;
+        let frame = 0;
+        const refit = () => {
+          cancelAnimationFrame(frame);
+          frame = requestAnimationFrame(fit);
+        };
+
+        refit();
+        const timers = [100, 400, 1000, 2500].map(ms => setTimeout(fit, ms));
+        window.addEventListener('resize', refit);
+        window.addEventListener('orientationchange', refit);
+
+        const fonts = document.fonts;
+        if (fonts) {
+          if (fonts.ready) fonts.ready.then(refit).catch(() => {});
+          if (fonts.addEventListener) fonts.addEventListener('loadingdone', refit);
+        }
+
+        let observer = null;
+        if (el && window.ResizeObserver) {
+          let lastWidth = el.clientWidth;
+          observer = new ResizeObserver(() => {
+            const width = el.clientWidth;
+            if (width !== lastWidth) {
+              lastWidth = width;
+              refit();
+            }
+          });
+          observer.observe(el);
+        }
+
+        return () => {
+          cancelAnimationFrame(frame);
+          timers.forEach(clearTimeout);
+          window.removeEventListener('resize', refit);
+          window.removeEventListener('orientationchange', refit);
+          if (fonts && fonts.removeEventListener) fonts.removeEventListener('loadingdone', refit);
+          if (observer) observer.disconnect();
+        };
+      }, [fit]);
 
       return (
         <textarea
           ref={ref}
-          rows={minRows}
+          rows={variant === 'letter' ? 14 : 3}
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className={`w-full px-3 py-2 rounded-lg border-2 border-amber-200 bg-white/85 japanese-sans text-base
-                      text-stone-800 leading-relaxed resize-none overflow-hidden
-                      focus:outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-200 ${className}`}
+          className={`field-input field-input--${variant}`}
           {...props}
         />
       );
@@ -782,6 +901,7 @@
       const [loading, setLoading] = useState(false);
       const [loadingMessage, setLoadingMessage] = useState('');
       const [loadingNote, setLoadingNote] = useState([]);
+      const [loadingStartedAt, setLoadingStartedAt] = useState(0);   // 経過時間の表示用
       const [error, setError] = useState(null);
 
       const profileInputRef = useRef(null);
@@ -850,6 +970,7 @@
         }
 
         setLoading(true);
+        setLoadingStartedAt(Date.now());
         setLoadingMessage('写真を読み取っています…');
         setLoadingNote(['30秒ほどかかります。', '画面を閉じずに、', 'このままお待ちください。']);
         setError(null);
@@ -874,6 +995,7 @@
           setLoading(false);
           setLoadingMessage('');
           setLoadingNote([]);
+          setLoadingStartedAt(0);
         }
       };
 
@@ -890,6 +1012,7 @@
         }
 
         setLoading(true);
+        setLoadingStartedAt(Date.now());
         setLoadingMessage('3年後の自分が返信を書いています…');
         setLoadingNote(['20〜30秒ほどかかります。', '画面を閉じずに、', 'このままお待ちください。']);
         setError(null);
@@ -909,6 +1032,7 @@
           setLoading(false);
           setLoadingMessage('');
           setLoadingNote([]);
+          setLoadingStartedAt(0);
         }
       };
 
@@ -997,7 +1121,7 @@
 
                 <div className="text-center animate-fade-in-up" style={{ animationDelay: '200ms' }}>
                   {loading ? (
-                    <LoadingAnimation message={loadingMessage} note={loadingNote} />
+                    <LoadingAnimation message={loadingMessage} note={loadingNote} startedAt={loadingStartedAt} />
                   ) : (
                     <div className="flex flex-col items-center gap-3">
                       <PrimaryButton onClick={readPhotos} disabled={!bothPhotos || anyPreparing}>
@@ -1053,10 +1177,10 @@
                           ●{f.label}
                         </span>
                         <AutoTextarea
+                          variant="profile"
                           value={profile[f.key]}
                           onChange={(v) => setProfile(prev => ({ ...prev, [f.key]: v }))}
                           maxLength={MAX_FIELD_LENGTH}
-                          minRows={1}
                         />
                       </label>
                     ))}
@@ -1082,10 +1206,10 @@
                   <label className="block">
                     <span className="block japanese-sans text-sm font-medium text-stone-600 mb-1">～3年後の自分へ～</span>
                     <AutoTextarea
+                      variant="letter"
                       value={letter}
                       onChange={setLetter}
                       maxLength={MAX_LETTER_LENGTH}
-                      minRows={8}
                     />
                   </label>
                   <p className="japanese-sans text-xs text-stone-500 mt-1 text-right">
@@ -1097,7 +1221,7 @@
 
                 <div className="text-center">
                   {loading ? (
-                    <LoadingAnimation message={loadingMessage} note={loadingNote} />
+                    <LoadingAnimation message={loadingMessage} note={loadingNote} startedAt={loadingStartedAt} />
                   ) : (
                     <div className="flex flex-col items-center gap-4">
                       <PrimaryButton onClick={requestReply} disabled={!letter.trim()}>

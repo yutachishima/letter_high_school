@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/read.js": {
+      "maxDuration": 180
+    },
+    "api/reply.js": {
+      "maxDuration": 120
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "letter_high_school",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "3年後の自分からの返信（高校生向け）",
+  "dependencies": {
+    "@neondatabase/serverless": "^1.2.0"
+  }
+}

@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html lang="ja" class="scroll-boot-lock">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#fef3c7">
+  <title>3年後の自分からの返信</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%89%EF%B8%8F%3C/text%3E%3C/svg%3E">
+
+  <!--
+    iPhoneのカメラ/QRコードからChromeを外部起動したとき、Chrome側が保存済みの
+    スクロール位置やフォーカスを遅れて復元することがある。
+    外部CDNやReactより先に、初期表示中だけルートスクロールを物理的に固定する。
+  -->
+  <style id="scroll-boot-critical">
+    html.scroll-boot-lock,
+    html.scroll-boot-lock body {
+      overflow: hidden !important;
+      overscroll-behavior: none !important;
+    }
+    html.scroll-boot-lock body {
+      position: fixed !important;
+      inset: 0 !important;
+      width: 100% !important;
+    }
+  </style>
+  <script>
+    (() => {
+      const root = document.documentElement;
+      const BOOT_FALLBACK_MS = 4000;
+      const FONT_WAIT_LIMIT_MS = 800;
+      const INITIAL_SETTLE_GUARD_MS = 1800;
+
+      let appReady = false;
+      let pageLoaded = document.readyState === 'complete';
+      let releasing = false;
+      let released = false;
+      let userInteracted = false;
+      let bootFrameId = 0;
+
+      if ('scrollRestoration' in history) {
+        history.scrollRestoration = 'manual';
+      }
+
+      const forceTop = () => {
+        try {
+          window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+        } catch (_) {
+          window.scrollTo(0, 0);
+        }
+
+        const scrollingElement = document.scrollingElement;
+        if (scrollingElement) scrollingElement.scrollTop = 0;
+        root.scrollTop = 0;
+        if (document.body) document.body.scrollTop = 0;
+      };
+
+      const twoFrames = () => new Promise(resolve => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      });
+
+      // React内の画面切り替えでも使う。短いバーストで復元処理より後まで0を維持する。
+      const resetPageScroll = () => {
+        forceTop();
+        requestAnimationFrame(() => {
+          forceTop();
+          requestAnimationFrame(forceTop);
+        });
+        setTimeout(forceTop, 60);
+      };
+      window.resetLetterPageScroll = resetPageScroll;
+
+      const noteUserInteraction = () => {
+        userInteracted = true;
+      };
+
+      window.addEventListener('touchstart', noteUserInteraction, {
+        capture: true,
+        passive: true,
+        once: true
+      });
+      window.addEventListener('pointerdown', noteUserInteraction, {
+        capture: true,
+        passive: true,
+        once: true
+      });
+      window.addEventListener('wheel', noteUserInteraction, {
+        capture: true,
+        passive: true,
+        once: true
+      });
+      window.addEventListener('keydown', noteUserInteraction, {
+        capture: true,
+        once: true
+      });
+
+      // Chromeが復元したフォーカスで特定ボタンへ自動スクロールするケースも初期表示中だけ抑止。
+      const stopAutomaticFocusScroll = (event) => {
+        if (userInteracted) return;
+        const target = event.target;
+        if (target && typeof target.blur === 'function') target.blur();
+        forceTop();
+      };
+      document.addEventListener('focusin', stopAutomaticFocusScroll, true);
+
+      // 遅れて発生するスクロール復元・viewport更新を、初期ロック中は常に打ち消す。
+      const keepTopDuringBoot = () => {
+        if (!released || !userInteracted) forceTop();
+      };
+      window.addEventListener('scroll', keepTopDuringBoot, {
+        capture: true,
+        passive: true
+      });
+
+      const viewport = window.visualViewport;
+      if (viewport) {
+        viewport.addEventListener('resize', keepTopDuringBoot, { passive: true });
+        viewport.addEventListener('scroll', keepTopDuringBoot, { passive: true });
+      }
+
+      const bootLoop = () => {
+        if (released) return;
+        forceTop();
+        bootFrameId = requestAnimationFrame(bootLoop);
+      };
+
+      const waitForFonts = async () => {
+        if (!document.fonts || !document.fonts.ready) return;
+        await Promise.race([
+          document.fonts.ready.catch(() => undefined),
+          new Promise(resolve => setTimeout(resolve, FONT_WAIT_LIMIT_MS))
+        ]);
+      };
+
+      const cleanupBootListeners = () => {
+        cancelAnimationFrame(bootFrameId);
+        document.removeEventListener('focusin', stopAutomaticFocusScroll, true);
+        window.removeEventListener('scroll', keepTopDuringBoot, true);
+        if (viewport) {
+          viewport.removeEventListener('resize', keepTopDuringBoot);
+          viewport.removeEventListener('scroll', keepTopDuringBoot);
+        }
+      };
+
+      const releaseBootLock = async (force = false) => {
+        if (released || releasing) return;
+        if (!force && (!appReady || !pageLoaded)) return;
+        releasing = true;
+
+        await waitForFonts();
+        await twoFrames();
+        forceTop();
+
+        // 先頭を確定してから固定を解除する。
+        root.classList.remove('scroll-boot-lock');
+        await twoFrames();
+        forceTop();
+
+        released = true;
+        cancelAnimationFrame(bootFrameId);
+        setTimeout(cleanupBootListeners, INITIAL_SETTLE_GUARD_MS);
+
+        // iOS Chromeの遅いviewport/フォーカス復元に備えた最後の補正。
+        // ユーザーが操作を始めた後は絶対に巻き戻さない。
+        const correctUnlessInteracted = () => {
+          if (!userInteracted) forceTop();
+        };
+        requestAnimationFrame(() => {
+          correctUnlessInteracted();
+          requestAnimationFrame(correctUnlessInteracted);
+        });
+        [0, 100, 350, 800, 1500].forEach(delay => {
+          setTimeout(correctUnlessInteracted, delay);
+        });
+      };
+
+      window.markLetterAppReady = () => {
+        appReady = true;
+        releaseBootLock();
+      };
+
+      document.addEventListener('DOMContentLoaded', forceTop, { once: true });
+
+      if (!pageLoaded) {
+        window.addEventListener('load', () => {
+          pageLoaded = true;
+          forceTop();
+          releaseBootLock();
+        }, { once: true });
+      }
+
+      // bfcacheから戻った場合も、復元スクロールより後に先頭へ戻す。
+      window.addEventListener('pageshow', (event) => {
+        if (!released) {
+          forceTop();
+        } else if (event.persisted) {
+          resetPageScroll();
+        }
+      });
+
+      // CDN障害などでReactが起動しない場合でも固定を残し続けない。
+      setTimeout(() => {
+        if (!released) {
+          appReady = true;
+          pageLoaded = true;
+          releaseBootLock(true);
+        }
+      }, BOOT_FALLBACK_MS);
+
+      forceTop();
+      bootLoop();
+    })();
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&family=Caveat:wght@400;600&display=swap" rel="stylesheet">
+  <!-- ライブラリはバージョンを固定しています（勝手に新しい版に変わって動かなくなるのを防ぐため） -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.13/babel.min.js"></script>
+  <style>
+    @keyframes float {
+      0%, 100% { transform: translateY(0px) rotate(0deg); }
+      50% { transform: translateY(-20px) rotate(2deg); }
+    }
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(30px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    .animate-float { animation: float 6s ease-in-out infinite; }
+    /* both：表示開始を遅らせている間も透明にしておき、一瞬だけ見えてしまうのを防ぐ */
+    .animate-fade-in-up { animation: fadeInUp 0.8s ease-out both; }
+    .shimmer-bg {
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
+      background-size: 200% 100%;
+      animation: shimmer 2s infinite;
+    }
+    /*
+      紙の質感。背景のグラデーション（Tailwind の bg-gradient-to-br）を上書きしないように、
+      疑似要素で薄く重ねる。
+    */
+    .paper-texture {
+      position: relative;
+      isolation: isolate;
+    }
+    .paper-texture::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      border-radius: inherit;
+      pointer-events: none;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%' height='100%' filter='url(%23noise)'/%3E%3C/svg%3E");
+      opacity: 0.1;
+      mix-blend-mode: multiply;
+    }
+    .letter-shadow {
+      box-shadow:
+        0 1px 1px rgba(0,0,0,0.08),
+        0 2px 2px rgba(0,0,0,0.08),
+        0 4px 4px rgba(0,0,0,0.08),
+        0 8px 8px rgba(0,0,0,0.08),
+        0 16px 16px rgba(0,0,0,0.08);
+    }
+    .handwriting { font-family: 'Caveat', 'Zen Kaku Gothic New', cursive; }
+    .japanese-serif { font-family: 'Zen Kaku Gothic New', sans-serif; font-weight: 500; }
+    .japanese-sans { font-family: 'Zen Kaku Gothic New', sans-serif; font-weight: 400; }
+    .section-badge { background: #3d6b70; }
+
+    /* 便箋の罫線（返信の表示用） */
+    .ruled {
+      background-image: repeating-linear-gradient(
+        to bottom,
+        transparent 0,
+        transparent calc(2em - 1px),
+        rgba(196, 165, 116, 0.35) calc(2em - 1px),
+        rgba(196, 165, 116, 0.35) 2em
+      );
+      line-height: 2em;
+    }
+
+    /* iOS系ブラウザのルートスクロールを一意にし、アンカー補正を無効化する */
+    html {
+      min-height: 100%;
+      background: #fef3c7;
+      scroll-behavior: auto;
+    }
+    html, body, #root, .app-shell {
+      overflow-anchor: none;
+    }
+    body {
+      margin: 0;
+      min-height: 100%;
+      background: #fef3c7;
+      color: #44403c;
+      /* hiddenの後にclipを置き、対応ブラウザでは縦方向のscroll container化を避ける */
+      overflow-x: hidden;
+      overflow-x: clip;
+    }
+    #root { min-height: 100%; }
+    .app-shell {
+      min-height: 100vh;
+      min-height: 100dvh;
+      overflow-x: hidden;
+      overflow-x: clip;
+    }
+    .app-content {
+      padding-top: calc(2rem + env(safe-area-inset-top, 0px));
+      /* Safari下部ツールバー分の余白も含め、フッターまで確実にスクロールできるようにする */
+      padding-bottom: calc(8rem + env(safe-area-inset-bottom, 0px));
+    }
+    @media (min-width: 768px) {
+      .app-content {
+        padding-top: 4rem;
+        padding-bottom: 4rem;
+      }
+    }
+
+    /* 読み込み中（JavaScriptが動く前）に表示する */
+    .boot-message {
+      font-family: 'Zen Kaku Gothic New', sans-serif;
+      text-align: center;
+      padding: 4rem 1rem;
+      color: #92400e;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .animate-float, .animate-fade-in-up, .shimmer-bg { animation: none !important; }
+      .animate-fade-in-up { opacity: 1; transform: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <p class="boot-message">読み込んでいます…</p>
+  </div>
+  <noscript>
+    <p class="boot-message">このページを使うには、ブラウザの JavaScript を有効にしてください。</p>
+  </noscript>
+
+  <script type="text/babel">
+    const { useState, useRef, useEffect, useLayoutEffect } = React;
+
+    /* ============================================================
+       設定（ここを書き換えると、画面の表示が変わります）
+       ============================================================ */
+    const CONTACT_TEXT = 'お問い合わせ：筑波大学人間系　千島雄太　chishima.yuta.fw@u.tsukuba.ac.jp';
+
+    // プロフィールの項目（lib/common.js の PROFILE_FIELDS と同じ並び・同じ key にしてください）
+    const PROFILE_FIELDS = [
+      { key: 'age', label: '年齢' },
+      { key: 'occupation', label: '職業・身分' },
+      { key: 'residence', label: '住んでいる場所や環境' },
+      { key: 'appearance', label: '服装・髪型' },
+      { key: 'personality', label: '性格' },
+      { key: 'activities', label: '活動の様子（熱心に取り組んでいること）' },
+      { key: 'relationships', label: '人間関係の様子（友達・家族・先輩後輩など）' }
+    ];
+    const MAX_FIELD_LENGTH = 1000;
+    const MAX_LETTER_LENGTH = 6000;
+
+    const PHOTO_SLOTS = [
+      { key: 'profile', number: 1, title: 'プロフィール', part: '「01」の部分' },
+      { key: 'letter', number: 2, title: '手紙', part: '「02」の部分' }
+    ];
+
+    const STEP_LABELS = ['写真をアップロード', '読み取り結果の確認', '返信を読む'];
+
+    /* ============================================================
+       写真の準備（スマホの写真をJPEGに変換して、ほどよい大きさにする）
+       ============================================================ */
+    const MAX_PHOTO_CHARS = 2000000; // 1枚あたりの上限（サーバー側の上限より少し小さく）
+
+    function loadImage(url) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('写真を読み込めませんでした。別の写真でお試しください。'));
+        img.src = url;
+      });
+    }
+
+    function drawJpeg(img, maxSide, quality) {
+      const w0 = img.naturalWidth || img.width;
+      const h0 = img.naturalHeight || img.height;
+      const scale = Math.min(1, maxSide / Math.max(w0, h0));
+      const w = Math.max(1, Math.round(w0 * scale));
+      const h = Math.max(1, Math.round(h0 * scale));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      return canvas.toDataURL('image/jpeg', quality);
+    }
+
+    async function prepareImage(file) {
+      const url = URL.createObjectURL(file);
+      try {
+        const img = await loadImage(url);
+        // 文字を読み取りやすいように大きめにしつつ、送れるサイズに収める
+        const attempts = [[2000, 0.82], [2000, 0.7], [1600, 0.7], [1280, 0.65]];
+        for (const [maxSide, quality] of attempts) {
+          const dataUrl = drawJpeg(img, maxSide, quality);
+          if (dataUrl.length <= MAX_PHOTO_CHARS) return dataUrl;
+        }
+        throw new Error('写真のサイズが大きすぎます。別の写真でお試しください。');
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    /* ============================================================
+       サーバーとのやりとり
+       ============================================================ */
+    async function postJson(url, body) {
+      let response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+      } catch (e) {
+        throw makeError('通信できませんでした。電波の良いところで、もう一度お試しください。');
+      }
+
+      const raw = await response.text();
+      let data = null;
+      try { data = JSON.parse(raw); } catch (e) { data = null; }
+
+      if (!response.ok) {
+        if (data && data.error) throw makeError(data.error, data.detail);
+        if (response.status === 413) throw makeError('写真のサイズが大きすぎます。別の写真でお試しください。');
+        if (response.status === 504) throw makeError('時間がかかりすぎてしまいました。もう一度お試しください。');
+        throw makeError(`エラーが起きました（${response.status}）。少し待ってから、もう一度お試しください。`);
+      }
+      return data || {};
+    }
+
+    function makeError(message, detail) {
+      const err = new Error(message);
+      err.detail = detail || '';
+      return err;
+    }
+
+    function emptyProfile() {
+      const p = {};
+      PROFILE_FIELDS.forEach(f => { p[f.key] = ''; });
+      return p;
+    }
+
+    function normalizeProfile(input) {
+      const p = emptyProfile();
+      PROFILE_FIELDS.forEach(f => {
+        const v = input && typeof input[f.key] === 'string' ? input[f.key] : '';
+        p[f.key] = v;
+      });
+      return p;
+    }
+
+    /** 今日から3年後の日付（例：2029年11月5日） */
+    function threeYearsLaterLabel() {
+      const now = new Date();
+      const d = new Date(now.getFullYear() + 3, now.getMonth(), now.getDate());
+      return d.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' });
+    }
+
+    /* ============================================================
+       装飾
+       ============================================================ */
+    const FloatingParticles = () => {
+      const [particles] = useState(() =>
+        Array.from({ length: 15 }, (_, i) => ({
+          id: i,
+          left: Math.random() * 100,
+          delay: Math.random() * 5,
+          duration: 5 + Math.random() * 5,
+          size: 4 + Math.random() * 8,
+          opacity: 0.1 + Math.random() * 0.3
+        }))
+      );
+
+      return (
+        <div className="fixed inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
+          {particles.map(p => (
+            <div
+              key={p.id}
+              className="absolute rounded-full"
+              style={{
+                left: `${p.left}%`,
+                top: '-20px',
+                width: p.size,
+                height: p.size,
+                background: `rgba(180, 140, 100, ${p.opacity})`,
+                animation: `float ${p.duration}s ease-in-out infinite`,
+                animationDelay: `${p.delay}s`
+              }}
+            />
+          ))}
+        </div>
+      );
+    };
+
+    const Envelope = ({ className = '' }) => (
+      <svg viewBox="0 0 100 80" className={className} aria-hidden="true">
+        <rect x="5" y="15" width="90" height="60" rx="3" fill="#F5E6D3" stroke="#C4A574" strokeWidth="2"/>
+        <path d="M5 18 L50 50 L95 18" fill="none" stroke="#C4A574" strokeWidth="2"/>
+        <path d="M5 75 L35 50" fill="none" stroke="#C4A574" strokeWidth="1.5"/>
+        <path d="M95 75 L65 50" fill="none" stroke="#C4A574" strokeWidth="1.5"/>
+      </svg>
+    );
+
+    const LoadingAnimation = ({ message, note }) => (
+      <div className="flex flex-col items-center justify-center py-10 animate-fade-in-up" role="status" aria-live="polite">
+        <div className="relative w-24 h-24 mb-6">
+          <div className="absolute inset-0 flex items-center justify-center">
+            <Envelope className="w-20 h-16 animate-float" />
+          </div>
+          <div className="absolute inset-0 rounded-full shimmer-bg opacity-50"/>
+        </div>
+        <p className="japanese-serif text-xl text-amber-800/80 text-center">{message}</p>
+        <div className="flex gap-1 mt-3">
+          {[0, 1, 2].map(i => (
+            <div
+              key={i}
+              className="w-2 h-2 rounded-full bg-amber-400"
+              style={{ animation: 'float 1s ease-in-out infinite', animationDelay: `${i * 0.2}s` }}
+            />
+          ))}
+        </div>
+        {note && note.length > 0 && (
+          <p className="japanese-sans text-sm text-stone-500 mt-4 text-center leading-relaxed">
+            {note.map((part, i) => <Phrase key={i}>{part}</Phrase>)}
+          </p>
+        )}
+      </div>
+    );
+
+    const StepIndicator = ({ current }) => (
+      <div className="mb-8 animate-fade-in-up">
+        <ol className="grid grid-cols-3 gap-1 md:gap-4 max-w-xl mx-auto text-stone-600 japanese-sans text-xs md:text-base font-medium">
+          {STEP_LABELS.map((label, i) => {
+            const n = i + 1;
+            const active = n <= current;
+            return (
+              <li key={label} className="flex flex-col items-center text-center" aria-current={n === current ? 'step' : undefined}>
+                <div className={`w-9 h-9 md:w-10 md:h-10 rounded-full border-2 flex items-center justify-center mb-2 transition-colors duration-300 ${
+                  active ? 'bg-sky-50 border-sky-300' : 'bg-white/40 border-stone-200'
+                }`}>
+                  <span className={active ? 'text-sky-600' : 'text-stone-400'}>{n}</span>
+                </div>
+                <span className={active ? '' : 'text-stone-400'}>{label}</span>
+              </li>
+            );
+          })}
+        </ol>
+      </div>
+    );
+
+    const ErrorBox = ({ error }) => {
+      if (!error) return null;
+      return (
+        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg animate-fade-in-up" role="alert">
+          <p className="japanese-sans text-red-700 text-base font-medium whitespace-pre-wrap">{error.message}</p>
+          {error.detail && (
+            <p className="japanese-sans text-xs text-red-400 mt-2 break-all">詳細: {error.detail}</p>
+          )}
+        </div>
+      );
+    };
+
+    const PrimaryButton = ({ children, onClick, disabled }) => (
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className={`
+          px-8 py-4 rounded-full japanese-serif text-xl transition-all duration-300 transform
+          ${disabled
+            ? 'bg-stone-200 text-stone-400 cursor-not-allowed'
+            : 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-lg hover:shadow-xl hover:scale-105'}
+        `}
+      >
+        {children}
+      </button>
+    );
+
+    const SecondaryButton = ({ children, onClick }) => (
+      <button
+        type="button"
+        onClick={onClick}
+        className="px-6 py-3 rounded-full japanese-sans text-base font-medium text-amber-700
+                   border-2 border-amber-300 bg-white/40 hover:bg-amber-50 transition-all duration-300"
+      >
+        {children}
+      </button>
+    );
+
+    // 日本語の見出しが変なところで改行されないように、ひとまとまりの語句を1つの塊にする
+    const Phrase = ({ children }) => <span className="inline-block">{children}</span>;
+
+    const SectionBadge = ({ children }) => (
+      <span className="section-badge inline-block text-white text-xs font-bold px-2 py-0.5 mr-2 rounded-sm align-middle tracking-wider">
+        {children}
+      </span>
+    );
+
+    /* ---------- 1ページ目：写真の枠 ---------- */
+    const PhotoBox = ({ slot, preview, preparing, onPick, onDropFile, onRemove }) => {
+      const handleKeyDown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onPick();
+        }
+      };
+      const handleDrop = (e) => {
+        e.preventDefault();
+        const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (file) onDropFile(file);
+      };
+
+      return (
+        <div
+          role="button"
+          tabIndex={0}
+          aria-label={`${slot.number}枚目（${slot.title}）の写真を選ぶ`}
+          onClick={onPick}
+          onKeyDown={handleKeyDown}
+          onDrop={handleDrop}
+          onDragOver={(e) => e.preventDefault()}
+          className={`
+            relative border-2 border-dashed rounded-xl px-2 py-4 text-center cursor-pointer
+            transition-all duration-300 bg-white/60 min-h-[210px] flex flex-col items-center
+            focus:outline-none focus:ring-2 focus:ring-amber-300
+            ${preview ? 'border-amber-400' : 'border-amber-200 hover:border-amber-300 hover:bg-white/80'}
+          `}
+        >
+          <p className="japanese-serif text-base text-amber-900 leading-snug">
+            <span className="block text-sm text-amber-700">{slot.number}枚目</span>
+            {slot.title}
+          </p>
+          <p className="japanese-sans text-xs text-stone-500 mt-0.5 mb-3">{slot.part}</p>
+
+          {preview ? (
+            <>
+              <img src={preview} alt={`${slot.number}枚目の写真`} className="max-h-28 max-w-full mx-auto rounded-md shadow-md object-contain"/>
+              <p className="japanese-sans text-sm text-amber-700 mt-2 font-medium">✓ 選択済み</p>
+              <p className="japanese-sans text-xs text-stone-500">タップで撮り直し</p>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onRemove(); }}
+                className="absolute top-1.5 right-1.5 w-7 h-7 bg-red-400 text-white rounded-full text-xs hover:bg-red-500 transition-colors"
+                aria-label={`${slot.number}枚目の写真を取り消す`}
+              >
+                ✕
+              </button>
+            </>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center">
+              <div className="w-12 h-12 mx-auto opacity-50">
+                <svg viewBox="0 0 64 64" className="w-full h-full" aria-hidden="true">
+                  <rect x="6" y="16" width="52" height="38" rx="5" fill="none" stroke="#8B7355" strokeWidth="2.5"/>
+                  <path d="M22 16 L26 9 L38 9 L42 16" fill="none" stroke="#8B7355" strokeWidth="2.5" strokeLinejoin="round"/>
+                  <circle cx="32" cy="35" r="10" fill="none" stroke="#8B7355" strokeWidth="2.5"/>
+                </svg>
+              </div>
+              <p className="japanese-sans text-stone-600 text-sm font-medium mt-2">タップして<br/>撮影・選択</p>
+            </div>
+          )}
+
+          {preparing && (
+            <div className="absolute inset-0 bg-white/80 rounded-xl flex items-center justify-center">
+              <p className="japanese-sans text-sm text-stone-600 font-medium">準備中…</p>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    /* ---------- 2ページ目：入力欄（内容に合わせて高さが伸びる） ---------- */
+    const AutoTextarea = ({ value, onChange, minRows = 1, className = '', ...props }) => {
+      const ref = useRef(null);
+      useLayoutEffect(() => {
+        const el = ref.current;
+        if (!el) return;
+        el.style.height = 'auto';
+        el.style.height = `${el.scrollHeight + 2}px`;
+      }, [value]);
+
+      return (
+        <textarea
+          ref={ref}
+          rows={minRows}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className={`w-full px-3 py-2 rounded-lg border-2 border-amber-200 bg-white/85 japanese-sans text-base
+                      text-stone-800 leading-relaxed resize-none overflow-hidden
+                      focus:outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-200 ${className}`}
+          {...props}
+        />
+      );
+    };
+
+    const PhotoPeek = ({ src, label }) => {
+      const [open, setOpen] = useState(false);
+      if (!src) return null;
+      return (
+        <div className="mb-4">
+          <button
+            type="button"
+            onClick={() => setOpen(o => !o)}
+            aria-expanded={open}
+            className="japanese-sans text-sm font-medium text-amber-700 underline underline-offset-4
+                       decoration-amber-300 hover:text-amber-800 hover:decoration-amber-500 transition-colors"
+          >
+            {open ? '写真を閉じる' : `📷 ${label}`}
+          </button>
+          {open && (
+            <img src={src} alt={label} className="mt-3 w-full rounded-lg border border-amber-200 shadow-sm" />
+          )}
+        </div>
+      );
+    };
+
+    const Notice = ({ children }) => (
+      <div className="mb-4 p-3 bg-amber-100/80 border border-amber-300 rounded-lg">
+        <p className="japanese-sans text-sm text-amber-900 leading-relaxed">{children}</p>
+      </div>
+    );
+
+    /* ---------- 3ページ目：返信の便箋 ---------- */
+    const ReplyLetter = ({ content }) => (
+      <div
+        className="relative px-6 py-8 md:p-12 rounded-sm letter-shadow paper-texture animate-fade-in-up
+                   bg-gradient-to-br from-amber-50 via-orange-50 to-yellow-50"
+        style={{ transform: 'rotate(0.4deg)' }}
+      >
+        <div className="absolute top-4 right-4 w-14 h-14 opacity-20" aria-hidden="true">
+          <svg viewBox="0 0 100 100" className="w-full h-full">
+            <path d="M90 10 L90 90 L10 90" fill="none" stroke="#8B7355" strokeWidth="2"/>
+            <circle cx="90" cy="10" r="4" fill="#8B7355"/>
+          </svg>
+        </div>
+
+        <p className="japanese-serif text-lg text-amber-900/80 mb-4">～3年前の自分へ～</p>
+
+        <div className="ruled japanese-sans text-[17px] text-stone-700 whitespace-pre-wrap break-words">
+          {content}
+        </div>
+
+        <div className="mt-8 pt-4 border-t border-amber-200/40 text-right">
+          <p className="handwriting text-xl text-amber-700/80">3年後の私より</p>
+          <p className="japanese-sans text-base text-stone-500 mt-1">{threeYearsLaterLabel()}</p>
+        </div>
+      </div>
+    );
+
+    /* ============================================================
+       メインアプリ
+       ============================================================ */
+    const App = () => {
+      const [step, setStep] = useState('upload');             // upload | confirm | reply
+
+      const [photos, setPhotos] = useState({ profile: null, letter: null });
+      const [preparing, setPreparing] = useState({ profile: false, letter: false });
+
+      const [record, setRecord] = useState(null);             // 読み取り済みデータの番号と合言葉
+      const [aiRead, setAiRead] = useState(null);             // AIの読み取り結果（注意の表示に使う）
+      const [profile, setProfile] = useState(emptyProfile);
+      const [letter, setLetter] = useState('');
+      const [reply, setReply] = useState('');
+
+      const [loading, setLoading] = useState(false);
+      const [loadingMessage, setLoadingMessage] = useState('');
+      const [loadingNote, setLoadingNote] = useState([]);
+      const [error, setError] = useState(null);
+
+      const profileInputRef = useRef(null);
+      const letterInputRef = useRef(null);
+      const inputRefs = { profile: profileInputRef, letter: letterInputRef };
+
+      // 初回DOMコミットをhead側のスクロール制御へ通知する（paint前に実行）。
+      useLayoutEffect(() => {
+        window.markLetterAppReady && window.markLetterAppReady();
+      }, []);
+
+      // 画面（step）が切り替わる際も、paint前にページ先頭を確定する。
+      useLayoutEffect(() => {
+        const resetPageScroll = window.resetLetterPageScroll || (() => window.scrollTo(0, 0));
+        resetPageScroll();
+      }, [step]);
+
+      const bothPhotos = Boolean(photos.profile && photos.letter);
+      const anyPreparing = preparing.profile || preparing.letter;
+      const stepNumber = step === 'upload' ? 1 : step === 'confirm' ? 2 : 3;
+
+      /* ---------- 写真 ---------- */
+      const choosePhoto = async (key, file) => {
+        if (!file) return;
+        if (file.type && !file.type.startsWith('image/')) {
+          setError(makeError('画像ファイルを選んでください。'));
+          return;
+        }
+        setError(null);
+        setPreparing(prev => ({ ...prev, [key]: true }));
+        try {
+          const dataUrl = await prepareImage(file);
+          setPhotos(prev => ({ ...prev, [key]: dataUrl }));
+          setRecord(null); // 写真が変わったら、読み取りからやり直す
+        } catch (e) {
+          setError(makeError(e && e.message ? e.message : '写真を準備できませんでした。別の写真でお試しください。'));
+        } finally {
+          setPreparing(prev => ({ ...prev, [key]: false }));
+        }
+      };
+
+      const handleFileInput = async (e, key) => {
+        const file = e.target.files && e.target.files[0];
+        e.target.value = '';
+        await choosePhoto(key, file);
+      };
+
+      const removePhoto = (key) => {
+        setPhotos(prev => ({ ...prev, [key]: null }));
+        setRecord(null);
+      };
+
+      /* ---------- 1 → 2：写真を読み取る ---------- */
+      const readPhotos = async () => {
+        if (!bothPhotos) {
+          setError(makeError('写真を2枚とも選んでください。'));
+          return;
+        }
+        if (anyPreparing || loading) return;
+
+        // 同じ写真をすでに読み取っていれば、その結果を使う
+        if (record) {
+          setError(null);
+          setStep('confirm');
+          return;
+        }
+
+        setLoading(true);
+        setLoadingMessage('写真を読み取っています…');
+        setLoadingNote(['30秒ほどかかります。', '画面を閉じずに、', 'このままお待ちください。']);
+        setError(null);
+
+        try {
+          const data = await postJson('/api/read', {
+            profileImage: photos.profile,
+            letterImage: photos.letter
+          });
+          const readProfile = normalizeProfile(data.profile);
+          const readLetter = typeof data.letter === 'string' ? data.letter : '';
+
+          setRecord({ id: data.id, token: data.token });
+          setAiRead({ profile: readProfile, letter: readLetter });
+          setProfile(readProfile);
+          setLetter(readLetter);
+          setReply('');
+          setStep('confirm');
+        } catch (e) {
+          setError(e);
+        } finally {
+          setLoading(false);
+          setLoadingMessage('');
+          setLoadingNote([]);
+        }
+      };
+
+      /* ---------- 2 → 3：返信をもらう ---------- */
+      const requestReply = async () => {
+        if (loading) return;
+        if (!record) {
+          setStep('upload');
+          return;
+        }
+        if (!letter.trim()) {
+          setError(makeError('手紙の欄が空です。手紙の内容を入力してください。'));
+          return;
+        }
+
+        setLoading(true);
+        setLoadingMessage('3年後の自分が返信を書いています…');
+        setLoadingNote(['20〜30秒ほどかかります。', '画面を閉じずに、', 'このままお待ちください。']);
+        setError(null);
+
+        try {
+          const data = await postJson('/api/reply', {
+            id: record.id,
+            token: record.token,
+            profile,
+            letter
+          });
+          setReply(data.reply || '');
+          setStep('reply');
+        } catch (e) {
+          setError(e);
+        } finally {
+          setLoading(false);
+          setLoadingMessage('');
+          setLoadingNote([]);
+        }
+      };
+
+      const backToUpload = () => {
+        setError(null);
+        setStep('upload');
+      };
+
+      const startOver = () => {
+        const ok = window.confirm('最初の画面に戻ると、この返信はもう表示できません。戻りますか？');
+        if (!ok) return;
+        setPhotos({ profile: null, letter: null });
+        setPreparing({ profile: false, letter: false });
+        setRecord(null);
+        setAiRead(null);
+        setProfile(emptyProfile());
+        setLetter('');
+        setReply('');
+        setError(null);
+        setStep('upload');
+      };
+
+      const profileLooksEmpty = aiRead && PROFILE_FIELDS.every(f => !aiRead.profile[f.key]);
+      const letterLooksEmpty = aiRead && !aiRead.letter;
+
+      return (
+        <div className="app-shell bg-gradient-to-br from-amber-100 via-orange-50 to-stone-100 relative">
+          <FloatingParticles />
+
+          {/* 飾りの円（はみ出してページが伸びないように、枠の中で切り取る） */}
+          <div className="absolute inset-0 overflow-hidden pointer-events-none" aria-hidden="true">
+            <div className="absolute top-0 right-0 w-96 h-96 bg-amber-200/20 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"/>
+            <div className="absolute bottom-0 left-0 w-80 h-80 bg-orange-200/20 rounded-full blur-3xl translate-y-1/2 -translate-x-1/2"/>
+          </div>
+
+          <div className="app-content relative z-10 container mx-auto px-4">
+            <header className="text-center mb-10">
+              <h1 className="japanese-serif text-3xl md:text-4xl text-amber-900 mb-2">
+                3年後の自分からの返信
+              </h1>
+            </header>
+
+            {/* ================= 1ページ目：写真2枚のアップロード ================= */}
+            {step === 'upload' && (
+              <main className="max-w-2xl mx-auto">
+                <StepIndicator current={stepNumber} />
+
+                <div className="mb-6 animate-fade-in-up" style={{ animationDelay: '100ms' }}>
+                  <h2 className="japanese-serif text-xl text-amber-900 text-center mb-2">
+                    <Phrase>ワークシートの写真を</Phrase><Phrase>2枚アップロードしてください</Phrase>
+                  </h2>
+                  <p className="japanese-sans text-base text-stone-600 text-center leading-relaxed mb-5">
+                    <Phrase>1枚目に「01 プロフィール」、</Phrase><Phrase>2枚目に「02 手紙」の部分を</Phrase><Phrase>撮影してください。</Phrase>
+                  </p>
+
+                  <input ref={profileInputRef} type="file" accept="image/*" className="hidden"
+                         onChange={(e) => handleFileInput(e, 'profile')} />
+                  <input ref={letterInputRef} type="file" accept="image/*" className="hidden"
+                         onChange={(e) => handleFileInput(e, 'letter')} />
+
+                  <div className="grid grid-cols-2 gap-3 md:gap-4">
+                    {PHOTO_SLOTS.map(slot => (
+                      <PhotoBox
+                        key={slot.key}
+                        slot={slot}
+                        preview={photos[slot.key]}
+                        preparing={preparing[slot.key]}
+                        onPick={() => { if (!loading) inputRefs[slot.key].current && inputRefs[slot.key].current.click(); }}
+                        onDropFile={(file) => { if (!loading) choosePhoto(slot.key, file); }}
+                        onRemove={() => { if (!loading) removePhoto(slot.key); }}
+                      />
+                    ))}
+                  </div>
+
+                  <div className="mt-5 p-4 rounded-xl bg-white/50 border border-amber-200/70">
+                    <p className="japanese-serif text-sm text-amber-900 mb-1">📷 きれいに読み取るコツ</p>
+                    <ul className="japanese-sans text-sm text-stone-600 leading-relaxed list-disc pl-5">
+                      <li>明るい場所で、影が入らないように撮る</li>
+                      <li>書いた部分が画面いっぱいに、まっすぐ写るように撮る</li>
+                      <li>撮ったあと、文字がぼやけていないか確かめる</li>
+                    </ul>
+                  </div>
+                </div>
+
+                <ErrorBox error={error} />
+
+                <div className="text-center animate-fade-in-up" style={{ animationDelay: '200ms' }}>
+                  {loading ? (
+                    <LoadingAnimation message={loadingMessage} note={loadingNote} />
+                  ) : (
+                    <div className="flex flex-col items-center gap-3">
+                      <PrimaryButton onClick={readPhotos} disabled={!bothPhotos || anyPreparing}>
+                        {anyPreparing
+                          ? '写真を準備中…'
+                          : record ? '読み取り結果の確認へ進む' : 'AIに読み取ってもらう'}
+                      </PrimaryButton>
+                      {!bothPhotos && (
+                        <p className="japanese-sans text-sm text-stone-500">
+                          {photos.profile || photos.letter ? 'あと1枚、写真を選んでください' : '写真を2枚選ぶと、押せるようになります'}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </main>
+            )}
+
+            {/* ================= 2ページ目：読み取り結果の確認・修正 ================= */}
+            {step === 'confirm' && (
+              <main className="max-w-2xl mx-auto">
+                <StepIndicator current={stepNumber} />
+
+                <div className="mb-6 text-center animate-fade-in-up">
+                  <h2 className="japanese-serif text-xl text-amber-900 mb-2">
+                    読み取った内容を確認してください
+                  </h2>
+                  <p className="japanese-sans text-base text-stone-600 leading-relaxed">
+                    <Phrase>AIが写真から読み取った内容です。</Phrase><Phrase>実際に書いた内容と違うところがあれば、</Phrase><Phrase>直してください。</Phrase>
+                  </p>
+                </div>
+
+                {/* ---- 01 プロフィール ---- */}
+                <section className="mb-8 p-5 md:p-8 rounded-sm letter-shadow paper-texture animate-fade-in-up
+                                    bg-gradient-to-br from-stone-50 via-amber-50 to-stone-100"
+                         aria-labelledby="profile-heading">
+                  <h3 id="profile-heading" className="japanese-serif text-lg text-amber-900 mb-3">
+                    <SectionBadge>01</SectionBadge>3年後の自分のプロフィール
+                  </h3>
+
+                  <PhotoPeek src={photos.profile} label="1枚目の写真を見ながら確認する" />
+
+                  {profileLooksEmpty && (
+                    <Notice>
+                      1枚目の写真からプロフィールを読み取れませんでした。写真を撮り直すか、下の欄に直接入力してください。
+                    </Notice>
+                  )}
+
+                  <div className="space-y-4">
+                    {PROFILE_FIELDS.map(f => (
+                      <label key={f.key} className="block">
+                        <span className="block japanese-sans text-sm font-medium text-stone-600 mb-1">
+                          ●{f.label}
+                        </span>
+                        <AutoTextarea
+                          value={profile[f.key]}
+                          onChange={(v) => setProfile(prev => ({ ...prev, [f.key]: v }))}
+                          maxLength={MAX_FIELD_LENGTH}
+                          minRows={1}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </section>
+
+                {/* ---- 02 手紙 ---- */}
+                <section className="mb-8 p-5 md:p-8 rounded-sm letter-shadow paper-texture animate-fade-in-up
+                                    bg-gradient-to-br from-stone-50 via-amber-50 to-stone-100"
+                         aria-labelledby="letter-heading">
+                  <h3 id="letter-heading" className="japanese-serif text-lg text-amber-900 mb-3">
+                    <SectionBadge>02</SectionBadge>3年後の自分への手紙
+                  </h3>
+
+                  <PhotoPeek src={photos.letter} label="2枚目の写真を見ながら確認する" />
+
+                  {letterLooksEmpty && (
+                    <Notice>
+                      2枚目の写真から手紙を読み取れませんでした。写真を撮り直すか、下の欄に直接入力してください。
+                    </Notice>
+                  )}
+
+                  <label className="block">
+                    <span className="block japanese-sans text-sm font-medium text-stone-600 mb-1">～3年後の自分へ～</span>
+                    <AutoTextarea
+                      value={letter}
+                      onChange={setLetter}
+                      maxLength={MAX_LETTER_LENGTH}
+                      minRows={8}
+                    />
+                  </label>
+                  <p className="japanese-sans text-xs text-stone-500 mt-1 text-right">
+                    {letter.length} / {MAX_LETTER_LENGTH}文字
+                  </p>
+                </section>
+
+                <ErrorBox error={error} />
+
+                <div className="text-center">
+                  {loading ? (
+                    <LoadingAnimation message={loadingMessage} note={loadingNote} />
+                  ) : (
+                    <div className="flex flex-col items-center gap-4">
+                      <PrimaryButton onClick={requestReply} disabled={!letter.trim()}>
+                        この内容で返信をもらう
+                      </PrimaryButton>
+                      <SecondaryButton onClick={backToUpload}>
+                        写真を選び直す
+                      </SecondaryButton>
+                    </div>
+                  )}
+                </div>
+              </main>
+            )}
+
+            {/* ================= 3ページ目：返信を読む ================= */}
+            {step === 'reply' && (
+              <main className="max-w-2xl mx-auto">
+                <StepIndicator current={stepNumber} />
+
+                <h2 className="japanese-serif text-2xl text-amber-800 mb-6 text-center animate-fade-in-up">
+                  <Phrase>✉️ 3年後の自分から</Phrase><Phrase>返信が届きました</Phrase>
+                </h2>
+
+                <ReplyLetter content={reply} />
+
+                <p className="japanese-sans text-xs text-stone-500 text-center mt-6 leading-relaxed">
+                  <Phrase>※この返信は、</Phrase><Phrase>AIが「3年後の自分」になりきって</Phrase><Phrase>書いたものです。</Phrase>
+                </p>
+
+                <details className="mt-8 p-4 rounded-xl bg-white/50 border border-amber-200/70">
+                  <summary className="japanese-sans text-base font-medium text-amber-800 cursor-pointer">
+                    自分が書いた手紙を見る
+                  </summary>
+                  <div className="japanese-sans text-base text-stone-700 leading-relaxed whitespace-pre-wrap break-words mt-3">
+                    {letter}
+                  </div>
+                </details>
+
+                <div className="text-center mt-10">
+                  <SecondaryButton onClick={startOver}>
+                    最初に戻る
+                  </SecondaryButton>
+                </div>
+              </main>
+            )}
+
+            <footer className="mt-16 text-center space-y-1">
+              <p className="japanese-sans text-sm text-stone-400">{CONTACT_TEXT}</p>
+            </footer>
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
